@@ -8,7 +8,10 @@ from transformers import AutoProcessor, AutoModelForAudioClassification
 import os
 import uuid
 import moviepy.editor as mp
+import logging
 
+logger = logging.getLogger(__name__)
+from ...lib.bot import synthesize_alert, AlertSchema
 from ...config.settings import settings
 from ..models.responses import AnalysisResponse
 from ...lib.bot import speech_to_text
@@ -53,7 +56,7 @@ def predict_emotion(audio_bytes: bytes) -> dict:
     # Get prediction + probabilities
     predicted_class_id = torch.argmax(probs).item()
     predicted_label = quantized_model.config.id2label[predicted_class_id]
-    print(predicted_label)
+    logger.info(f"Predicted emotion: {predicted_label}")
     return {
         "predicted_emotion": predicted_label,
         "probabilities": {
@@ -116,22 +119,38 @@ async def process_video(file: UploadFile = File(...)):
         try:
             clip = mp.VideoFileClip(tmp_video_path)
         except Exception as e:
-            return {"error": f"Failed to load video file: {str(e)}"}
+            return AlertSchema(
+                type="technical",
+                message=f"Failed to load video file: {str(e)}",
+                severity="high"
+            )
 
         # Extract audio
         if clip.audio is not None:
             try:
                 clip.audio.write_audiofile(audio_output_path, verbose=False, logger=None)
             except Exception as e:
-                return {"error": f"Failed to write audio file: {str(e)}"}
+                return AlertSchema(
+                    type="technical",
+                    message=f"Failed to write audio file: {str(e)}",
+                    severity="high"
+                )
         else:
-            return {"error": "No audio track found in the uploaded video."}
+            return AlertSchema(
+                type="technical",
+                message="No audio track found in the uploaded video.",
+                severity="medium"
+            )
 
         # Extract frames every 5 seconds
         try:
             frame_paths = extract_frames(tmp_video_path, frames_dir)
         except Exception as e:
-            return {"error": f"Failed to extract frames: {str(e)}"}
+            return AlertSchema(
+                type="technical",
+                message=f"Failed to extract frames: {str(e)}",
+                severity="high"
+            )
 
         # Process frames through Roboflow workflow
         frame_results = []
@@ -155,13 +174,22 @@ async def process_video(file: UploadFile = File(...)):
             audio_text = speech_to_text(audio_only_bytes)
             audio_result = predict_emotion(audio_only_bytes)
 
-        return {
+        analysis_result = {
             "frame_analysis": frame_results,
             "audio_analysis": audio_result,
             "audio_text": audio_text,
         }
+        logger.info(f"Analysis result: {analysis_result}")
+        alert = await synthesize_alert(analysis_result)
+        logger.info(f"Alert: {alert}")
+        return alert
+
     except Exception as e:
-        return {"error": str(e)}
+        return AlertSchema(
+            type="technical",
+            message=str(e),
+            severity="high"
+        )
     finally:
         # Clean up all temporary files and directories
         try:
@@ -171,6 +199,6 @@ async def process_video(file: UploadFile = File(...)):
                 import shutil
                 shutil.rmtree(tmp_dir)
         except Exception as e:
-            print(f"Warning: Failed to clean up temporary files: {e}")
+            logger.error(f"Warning: Failed to clean up temporary files: {e}")
 
 

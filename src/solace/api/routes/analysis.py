@@ -11,26 +11,26 @@ import moviepy.editor as mp
 
 from ...config.settings import settings
 from ..models.responses import AnalysisResponse
+from ...lib.bot import speech_to_text
 
 router = APIRouter(prefix="/analysis")
 
 # Load model once at startup
 model_name = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
-try:
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForAudioClassification.from_pretrained(model_name, trust_remote_code=True)
-except Exception as e:
-    print(f"Error loading model: {e}")
-    # Fallback to feature extractor if processor fails
-    from transformers import Wav2Vec2FeatureExtractor
-    processor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-    model = AutoModelForAudioClassification.from_pretrained(model_name)
+
+from transformers import Wav2Vec2FeatureExtractor
+processor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+model = AutoModelForAudioClassification.from_pretrained(model_name)
+quantized_model = torch.quantization.quantize_dynamic(
+    model,
+    {torch.nn.Linear},  # Only quantize Linear layers
+    dtype=torch.float16
+)
 
 client = InferenceHTTPClient(
     api_url=settings.roboflow_api_url,
     api_key=settings.roboflow_api_key
 )
-
 
 
 def predict_emotion(audio_bytes: bytes) -> dict:
@@ -47,17 +47,17 @@ def predict_emotion(audio_bytes: bytes) -> dict:
 
     # Inference
     with torch.no_grad():
-        logits = model(**inputs).logits
+        logits = quantized_model(**inputs).logits
     probs = torch.nn.functional.softmax(logits, dim=-1)[0]
 
     # Get prediction + probabilities
     predicted_class_id = torch.argmax(probs).item()
-    predicted_label = model.config.id2label[predicted_class_id]
+    predicted_label = quantized_model.config.id2label[predicted_class_id]
     print(predicted_label)
     return {
         "predicted_emotion": predicted_label,
         "probabilities": {
-            model.config.id2label[i]: float(p)
+            quantized_model.config.id2label[i]: float(p)
             for i, p in enumerate(probs)
         }
     }
@@ -95,7 +95,7 @@ def extract_frames(video_path: str, output_dir: str, interval: int = 5):
     cap.release()
     return frames
 
-@router.post("/process_video", response_model=AnalysisResponse)
+@router.post("/process_video")
 async def process_video(file: UploadFile = File(...)):
     # Save uploaded video to a temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
@@ -152,11 +152,13 @@ async def process_video(file: UploadFile = File(...)):
         # Process audio
         with open(audio_output_path, "rb") as f_aud:
             audio_only_bytes = f_aud.read()
+            audio_text = speech_to_text(audio_only_bytes)
             audio_result = predict_emotion(audio_only_bytes)
 
         return {
             "frame_analysis": frame_results,
-            "audio_analysis": audio_result
+            "audio_analysis": audio_result,
+            "audio_text": audio_text,
         }
     except Exception as e:
         return {"error": str(e)}

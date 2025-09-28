@@ -10,13 +10,15 @@ import uuid
 import moviepy.editor as mp
 import logging
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn")
 from ...lib.bot import synthesize_alert, AlertSchema
 from ...config.settings import settings
-from ..models.responses import AnalysisResponse
 from ...lib.bot import speech_to_text
+from ...lib.redis import Redis
 
 router = APIRouter(prefix="/analysis")
+
+redis_client = Redis()
 
 # Load model once at startup
 model_name = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
@@ -100,9 +102,20 @@ def extract_frames(video_path: str, output_dir: str, interval: int = 5):
 
 @router.post("/process_video")
 async def process_video(file: UploadFile = File(...)):
+    # Validate video format
+    allowed_content_types = ["video/mp4", "video/webm"]
+    if file.content_type not in allowed_content_types:
+        return AlertSchema(
+            type="technical",
+            message=f"Unsupported video format. Please upload MP4 or WebM files. Got: {file.content_type}",
+            severity="high"
+        )
     # Save uploaded video to a temp file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
-        video_bytes = await file.read()
+    # Detect video format from content
+    video_bytes = await file.read()
+    video_format = ".webm" if file.content_type == "video/webm" else ".mp4"
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=video_format) as tmp_video:
         tmp_video.write(video_bytes)
         tmp_video_path = tmp_video.name
 
@@ -181,6 +194,15 @@ async def process_video(file: UploadFile = File(...)):
         }
         logger.info(f"Analysis result: {analysis_result}")
         alert = await synthesize_alert(analysis_result)
+        if isinstance(alert, str):
+            return "No alert generated"
+        else:
+            redis_client.add_message("name", 
+            {
+                "role": "analysis_report",
+                "content": alert.model_dump_json()
+            })
+            logger.error(f"Added alert to redis: {alert.model_dump_json()}")
         logger.info(f"Alert: {alert}")
         return alert
 

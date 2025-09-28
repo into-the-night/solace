@@ -3,18 +3,18 @@ from deepgram import (
     PrerecordedOptions,
     FileSource,
 )
-from google import genai
+# from google import genai
+from ollama import chat, ChatResponse
 from pydantic import BaseModel, Field
-from datetime import datetime
-# from .redis import Redis
 from logging import getLogger
 
 logger = getLogger('uvicorn')
 from ..config.settings import settings
 
-client = genai.Client(api_key=settings.gemini_api_key)
+# client = genai.Client(api_key=settings.gemini_api_key)
+
+
 deepgram_client = DeepgramClient(api_key=settings.deepgram_api_key)
-# redis_client = Redis()
 
 class AlertSchema(BaseModel):
     type: str = Field(..., description="The type of problem, mental or physical, or None.")
@@ -45,7 +45,7 @@ def speech_to_text(audio_bytes: bytes, language: str = "en") -> str:
     return data
 
 
-async def synthesize_alert(analysis_result: dict) -> AlertSchema:
+async def synthesize_alert(analysis_result: dict) -> AlertSchema | str:
     """synthesize alert using Gemini"""
     try:
         facial_emotions = []
@@ -80,7 +80,7 @@ async def synthesize_alert(analysis_result: dict) -> AlertSchema:
     Facial Emotions: {facial_emotions}
     Voice Sentiment: {voice_sentiment}
     
-    Please judge the situation and generate a suitable Alert for the ground zero agency and medical professionals. Focus on negative emotions and be concise.
+    Please judge the situation and generate a suitable Alert for the ground zero agency and medical professionals. Focus on the overall mood and emotions and be concise.
     
     You MUST respond with a JSON object containing these fields:
     {{
@@ -91,22 +91,26 @@ async def synthesize_alert(analysis_result: dict) -> AlertSchema:
     """
     logger.error(f"Prompt: {prompt}")
     try:
-        response = await client.aio.models.generate_content(
-            model="gemini-2.5-pro",
-            contents=[prompt],
+        # response = await client.aio.models.generate_content(
+        #     model="gemini-2.5-pro",
+        #     contents=[prompt],
+        # )
+
+        response : ChatResponse = chat(
+            model="gemma3:1b", 
+            messages=[{
+                "role": "user",
+                "content": prompt
+            }]
         )
         logger.error(f"Response: {response}")
-        if not response.text:
-            return AlertSchema(
-                type="technical",
-                message="Failed to generate alert - empty response from Gemini",
-                severity="high"
-            )
+        if not response.message.content:
+            return "Error occurred while generating alert"
             
         # Try to parse the response as JSON
         try:
             import json
-            response_text = response.text
+            response_text = response.message.content
             if response_text.startswith("```"):
                 response_text = response_text.split("```")[1]
                 if response_text.startswith("json"):
@@ -116,17 +120,38 @@ async def synthesize_alert(analysis_result: dict) -> AlertSchema:
             return AlertSchema(**alert_data)
         except (json.JSONDecodeError, ValueError) as e:
             # If JSON parsing fails, return the raw text as a message
-            return AlertSchema(
-                type="technical",
-                message=f"Failed to parse Gemini response as JSON: {response.text[:200]}",
-                severity="high"
-            )
+            return f"Failed to parse Gemini response as JSON: {response.text[:200]}"
             
     except Exception as e:
-        return AlertSchema(
-            type="technical",
-            message=f"Failed to generate alert: {str(e)}",
-            severity="high"
-        )
+        return f"Failed to generate alert: {str(e)}"
 
+async def invoke_llm(history: list):
+    """
+    Chat with a bot and provide a response to the farmer in a friendly and easy to understand manner.
+    """
+    conversation_context = ""
+    if history:
+        for msg in history:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            conversation_context += f"{role.capitalize()}: {content}\n\n"
+    
+    prompt = f"""
+        You are a mental healthcare assistant named Maitri, you will talk to the user and adapt according to their tone and mental health condition and always answer in a friendly tone.
+        
+        Here is the conversation history:
+        {conversation_context}
+        
+        Please provide a helpful response to the user's latest message in the following format taking into account the conversation context.
+        """
+    
+    response : ChatResponse = chat(
+        model="gemma3:1b",
+        messages=[{
+            "role": "user",
+            "content": prompt
+        }]
+    )
+    response_text = response.message.content
+    return response_text
 

@@ -17,8 +17,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
         "role": "user",
         "content": request.message
     }
-    redis_client.add_message("name", user_message)
-    history = redis_client.get_recent_messages("name", limit=10)
+    redis_client.add_message(request.user_id, user_message)
+    history = redis_client.get_recent_messages(request.user_id, limit=10)
     
     response = await invoke_llm(history)
     
@@ -27,7 +27,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         "role": "assistant",
         "content": response
     }
-    redis_client.add_message("name", assistant_message)
+    redis_client.add_message(request.user_id, assistant_message)
     
     return ChatResponse(
         message=response,
